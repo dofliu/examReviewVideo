@@ -18,9 +18,14 @@ import os
 import sys
 from pathlib import Path
 
+# Windows 終端 cp950 不支援 emoji，強制 UTF-8
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import fitz  # pymupdf
 
-MODEL = "claude-opus-4-5"  # 可換成 claude-sonnet-4-5 降低成本
+MODEL = "gemini-2.5-flash"  # 或 gemini-2.5-pro
 MAX_TOKENS = 8192
 
 SYSTEM_PROMPT = """你是一位資深的工程/數學老師,專長是將考卷題目清楚地拆解成黑板板書形式的教學影片腳本。
@@ -69,37 +74,42 @@ def pdf_to_images_b64(pdf_path: Path, dpi: int = 150) -> list[str]:
     return images
 
 
-def solve_with_claude(pdf_path: Path) -> dict:
-    """呼叫 Claude API 進行解題"""
-    from anthropic import Anthropic
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+def solve_with_gemini(pdf_path: Path) -> dict:
+    """呼叫 Gemini API 進行解題"""
+    from google import genai
+    from google.genai import types
+    
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        sys.exit("❌ 缺少 ANTHROPIC_API_KEY 環境變數。請執行:export ANTHROPIC_API_KEY=sk-ant-...")
+        sys.exit("❌ 缺少 GEMINI_API_KEY 環境變數。")
 
-    client = Anthropic(api_key=api_key)
+    client = genai.Client(api_key=api_key)
     images_b64 = pdf_to_images_b64(pdf_path)
-    print(f"[solve] PDF 有 {len(images_b64)} 頁,送給 Claude Vision...")
+    print(f"[solve] PDF 有 {len(images_b64)} 頁,送給 Gemini Vision...")
 
-    content = []
+    contents = []
     for b64 in images_b64:
-        content.append({
-            "type": "image",
-            "source": {"type": "base64", "media_type": "image/png", "data": b64},
-        })
-    content.append({
-        "type": "text",
-        "text": "這是一份考卷。請依照系統指示,為每一題產生結構化解答 JSON。",
-    })
-
-    resp = client.messages.create(
+        contents.append(
+            types.Part.from_bytes(
+                data=base64.b64decode(b64),
+                mime_type="image/png"
+            )
+        )
+    contents.append(
+        "這是一份考卷。請依照系統指示,為每一題產生結構化解答 JSON。"
+    )
+    
+    response = client.models.generate_content(
         model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": content}],
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.2,
+            max_output_tokens=MAX_TOKENS,
+        )
     )
 
-    text = resp.content[0].text.strip()
+    text = response.text.strip()
     # 容錯:如果意外被包在 ```json``` 中,剝掉
     if text.startswith("```"):
         text = text.split("```")[1]
@@ -110,9 +120,9 @@ def solve_with_claude(pdf_path: Path) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
-        err_path = Path(__file__).parent / "claude_raw_output.txt"
+        err_path = Path(__file__).parent / "gemini_raw_output.txt"
         err_path.write_text(text, encoding="utf-8")
-        sys.exit(f"Claude JSON parse error: {e}\n   Raw output saved to {err_path}")
+        sys.exit(f"Gemini JSON parse error: {e}\n   Raw output saved to {err_path}")
 
 
 def mock_output() -> dict:
@@ -187,10 +197,10 @@ def main():
     out_path = Path(args.output) if args.output else pdf_path.with_suffix(".json")
 
     if args.mock:
-        print("[solve] 使用 Mock 模式 (不呼叫 Claude API)")
+        print("[solve] 使用 Mock 模式 (不呼叫 Gemini API)")
         data = mock_output()
     else:
-        data = solve_with_claude(pdf_path)
+        data = solve_with_gemini(pdf_path)
 
     out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     n = len(data.get("problems", []))
