@@ -134,6 +134,36 @@ def render_frame(
         draw.text((190, y), step["display"], font=step_font, fill=color)
         y += 130
 
+    # 如果有附加圖片，顯示在右半邊
+    if "image" in data and data["image"]:
+        img_path = Path(data["image"])
+        if img_path.exists():
+            try:
+                # 載入圖片並縮放到適合大小
+                paste_img = Image.open(img_path)
+                paste_img.thumbnail((750, 600))  # 保持比例縮放
+                
+                # 放置位置：畫面右側，分隔線下方
+                paste_x = WIDTH - paste_img.width - 100
+                paste_y = sep_y + 60
+                
+                # 畫一個白底的框框當作紙張，比較有融合感
+                pad = 10
+                draw.rectangle(
+                    [paste_x - pad, paste_y - pad, 
+                     paste_x + paste_img.width + pad, paste_y + paste_img.height + pad],
+                    fill="white", outline=CHALK_WHITE, width=4
+                )
+                
+                # 確保圖片可被貼上 (處理 RGBA 等)
+                if paste_img.mode in ('RGBA', 'LA') or (paste_img.mode == 'P' and 'transparency' in paste_img.info):
+                    alpha = paste_img.convert('RGBA').split()[-1]
+                    img.paste(paste_img, (paste_x, paste_y), mask=alpha)
+                else:
+                    img.paste(paste_img, (paste_x, paste_y))
+            except Exception as e:
+                print(f"[warning] 無法載入圖片 {img_path}: {e}")
+
     img.save(out_path, "PNG")
 
 

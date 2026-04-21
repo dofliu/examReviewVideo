@@ -21,12 +21,15 @@ PIPELINE = Path(__file__).parent / "pipeline.py"
 
 def problem_to_v0_json(exam_title: str, prob: dict) -> dict:
     """把 v1 的 problem 轉成 v0 pipeline 吃的格式"""
-    return {
+    v0_dict = {
         "title": f"{exam_title} — {prob['number']}",
         "subtitle": prob["problem"][:30] + ("..." if len(prob["problem"]) > 30 else ""),
         "problem": prob["problem"],
         "steps": prob["steps"],
     }
+    if "image" in prob:
+        v0_dict["image"] = prob["image"]
+    return v0_dict
 
 
 def main():
