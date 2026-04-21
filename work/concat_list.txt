@@ -3,3 +3,4 @@ file 'D:\Dropbox\Project_CodingSimulation\courseRelated\autoSolverVideo\work\cli
 file 'D:\Dropbox\Project_CodingSimulation\courseRelated\autoSolverVideo\work\clip_002.mp4'
 file 'D:\Dropbox\Project_CodingSimulation\courseRelated\autoSolverVideo\work\clip_003.mp4'
 file 'D:\Dropbox\Project_CodingSimulation\courseRelated\autoSolverVideo\work\clip_004.mp4'
+file 'D:\Dropbox\Project_CodingSimulation\courseRelated\autoSolverVideo\work\clip_005.mp4'

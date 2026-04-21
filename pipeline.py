@@ -142,13 +142,19 @@ def build_clip(frame_path: Path, audio_path: Path, duration: float, out_path: Pa
     """單一步驟 → 一段 mp4 clip (圖片 + 音檔,含結尾停頓)"""
     # 在音檔後加 silence pad
     total_duration = duration + PAUSE_AFTER_EACH
+    # 音訊處理鏈：resample 44.1kHz → 響度正規化 → 結尾靜音填充
+    af_chain = (
+        f"aresample=44100,"
+        f"loudnorm=I=-16:TP=-1.5:LRA=11,"
+        f"apad=pad_dur={PAUSE_AFTER_EACH}"
+    )
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-loop", "1", "-i", str(frame_path),
         "-i", str(audio_path),
-        "-af", f"apad=pad_dur={PAUSE_AFTER_EACH}",
+        "-af", af_chain,
         "-c:v", "libx264", "-tune", "stillimage",
-        "-c:a", "aac", "-b:a", "192k",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
         "-pix_fmt", "yuv420p",
         "-t", f"{total_duration:.3f}",
         "-r", "30",

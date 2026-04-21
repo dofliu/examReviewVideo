@@ -150,3 +150,9 @@ pipeline.py
 - 實驗室有兩位研究生會接觸到這個 repo:Kiwi (RAG domain-focused)、Christian (RAG architecture)
 - 這個工具未來可能整合進 IAE 系課程網站或我的 YouTube 頻道
 - 影片輸出要考慮檔案大小控制,單題目標 < 3 MB(1 分鐘左右)
+
+## Git 同步規則
+
+- 開始工作前必須先執行 /sync
+- 結束工作前必須 commit + push
+- 切換環境（本地 ↔ 雲端）前確認 git status 乾淨

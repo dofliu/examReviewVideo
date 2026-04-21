@@ -25,7 +25,7 @@ if sys.platform == "win32":
 
 import fitz  # pymupdf
 
-MODEL = "gemini-2.5-flash"  # 或 gemini-2.5-pro
+MODEL = "gemini-3-flash-preview"  # 或 gemini-2.5-pro
 MAX_TOKENS = 8192
 
 SYSTEM_PROMPT = """你是一位資深的工程/數學老師,專長是將考卷題目清楚地拆解成黑板板書形式的教學影片腳本。
