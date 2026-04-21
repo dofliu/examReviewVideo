@@ -1,0 +1,31 @@
+{
+  "title": "材料力學 — 期中考 (Mock) — 第 2 題",
+  "subtitle": "簡支樑 L=4m, 跨中 P=10kN, b=50mm, h...",
+  "problem": "簡支樑 L=4m, 跨中 P=10kN, b=50mm, h=100mm。求 M_max 與 σ_max",
+  "steps": [
+    {
+      "display": "M_max = PL / 4",
+      "narration": "簡支樑跨中受集中力,最大彎矩發生在跨中,公式是 P 乘 L 除以 4。"
+    },
+    {
+      "display": "M_max = 10000 × 4 / 4 = 10000 N·m",
+      "narration": "代入數值,最大彎矩等於 10000 牛頓米,也就是 10 千牛頓米。"
+    },
+    {
+      "display": "σ_max = M·c / I",
+      "narration": "(b) 最大彎曲應力:M 乘以距中性軸最遠距離 c,再除以慣性矩 I。"
+    },
+    {
+      "display": "I = bh³/12 = 50 × 100³ / 12",
+      "narration": "矩形截面的慣性矩公式是 b 乘 h 三次方除以 12。"
+    },
+    {
+      "display": "I = 4.17 × 10⁶ mm⁴,  c = 50 mm",
+      "narration": "算出 I 大約是 4.17 乘 10 的 6 次方立方毫米,最遠距離是半個高度 50 毫米。"
+    },
+    {
+      "display": "σ_max = 120 MPa",
+      "narration": "代進去可以得到最大正向應力 120 百萬帕。這一題要注意單位的換算。"
+    }
+  ]
+}
