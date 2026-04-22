@@ -1,6 +1,5 @@
 {
   "_comment": "數學/工程符號 → TTS 發音對照表。narration 在進 TTS 前會做 longest-match 替換,SRT 字幕仍顯示原符號。要新增/改寫直接編輯即可,不用改 code。",
-
   "ωn": "omega n",
   "ω_n": "omega n",
   "ωd": "omega d",
@@ -18,7 +17,6 @@
   "Kp": "K p",
   "Ki": "K i",
   "Kd": "K d",
-
   "ζ": "zeta",
   "ω": "omega",
   "σ": "sigma",
@@ -38,7 +36,6 @@
   "Δ": "delta",
   "Σ": "sigma",
   "Ω": "ohm",
-
   "∑": "sigma 總和",
   "∫": "積分",
   "∂": "偏微分",

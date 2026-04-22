@@ -6,6 +6,7 @@ V0 考卷檢討影片生成器
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -60,9 +61,11 @@ def _load_pronunciation_map() -> list[tuple[str, str]]:
 
 
 def normalize_for_tts(text: str) -> str:
-    """把數學/希臘符號替換成 TTS 念得出來的拼音,SRT 字幕不走這層,仍保留原符號"""
+    """把數學/希臘符號替換成 TTS 拼音。替換時前後補 space 避免黏字,最後把多重空白壓成單一。
+    SRT 字幕不走這層,仍保留原符號。"""
     for src, dst in _load_pronunciation_map():
-        text = text.replace(src, dst)
+        text = text.replace(src, f" {dst} ")
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
@@ -173,6 +176,47 @@ def draw_text_mixed(
         x += int(font.getlength(ch))
 
 
+def wrap_text_for_font(
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    max_width: int,
+) -> list[str]:
+    """CJK-aware 貪婪換行:逐字元累積,超寬就切行。保留顯式 \\n"""
+    lines: list[str] = []
+    for raw_line in text.split("\n"):
+        if not raw_line:
+            lines.append("")
+            continue
+        buf = ""
+        for ch in raw_line:
+            if font.getlength(buf + ch) > max_width and buf:
+                lines.append(buf)
+                buf = ch
+            else:
+                buf += ch
+        if buf:
+            lines.append(buf)
+    return lines
+
+
+def draw_text_mixed_wrapped(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    main_font: ImageFont.FreeTypeFont,
+    fill,
+    max_width: int,
+    line_height: int,
+) -> int:
+    """畫會換行的混合字型文字,回傳下一個 y 座標(供後續內容定位)"""
+    wrapped = wrap_text_for_font(text, main_font, max_width)
+    x, y = xy
+    for ln in wrapped:
+        draw_text_mixed(draw, (x, y), ln, main_font, fill)
+        y += line_height
+    return y
+
+
 # ---------- 黑板渲染 ----------
 def draw_board_border(draw: ImageDraw.ImageDraw):
     """畫黑板木框"""
@@ -189,64 +233,117 @@ def render_frame(
     out_path: Path
 ):
     """
-    渲染第 N 幀:累積顯示前 steps_to_show 個步驟
-    最新一步用黃色粉筆突顯
+    渲染第 N 幀:累積顯示前 steps_to_show 個步驟。
+    - 步驟超過可視區會自動「滾動」,永遠保留最新 N 步(前面的滾出去)
+    - step 可帶自己的 image 欄位,渲染時顯示目前為止最新出現過的 image
+    - 底部 SUBTITLE_RESERVE 高度不繪製內容,留給字幕
     """
     img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
     draw = ImageDraw.Draw(img)
     draw_board_border(draw)
 
-    title_font = ImageFont.truetype(FONT_PATH, 44)
-    problem_font = ImageFont.truetype(FONT_PATH, 72)
+    # 標題縮小當左上角標籤,題目才是主角
+    title_font = ImageFont.truetype(FONT_PATH, 24)
+    problem_font = ImageFont.truetype(FONT_PATH, 60)   # 相對放大
     step_font = ImageFont.truetype(FONT_PATH, 68)
 
-    # 左上角標題
-    draw_text_mixed(draw, (80, 60), data.get("title", ""), title_font, CHALK_TITLE)
-    draw_text_mixed(draw, (80, 115), data.get("subtitle", ""), title_font, CHALK_TITLE)
+    title_line_h = 30
+    problem_line_h = 76
+    step_line_h = 78
+    step_gap = 30
 
-    # 題目 (畫一條分隔線在下方)
-    problem_y = 210
-    draw_text_mixed(draw, (100, problem_y), data["problem"], problem_font, CHALK_PROBLEM)
-    sep_y = problem_y + 100
+    SUBTITLE_RESERVE = 220   # 底部留 220 px 給字幕
+    STEP_Y_MAX = HEIGHT - SUBTITLE_RESERVE
+
+    # 左上角小字標籤(title + 可選 subtitle),字級小、顏色較暗,不搶戲
+    title_max_w = WIDTH - 160
+    y_cursor = 25
+    y_cursor = draw_text_mixed_wrapped(
+        draw, (60, y_cursor), data.get("title", ""),
+        title_font, CHALK_TITLE, title_max_w, title_line_h,
+    )
+    y_cursor = draw_text_mixed_wrapped(
+        draw, (60, y_cursor), data.get("subtitle", ""),
+        title_font, CHALK_TITLE, title_max_w, title_line_h,
+    )
+
+    # 題目(主角):下方多留一點空間,再開始
+    problem_y = y_cursor + 20
+    problem_max_w = WIDTH - 200
+    next_y = draw_text_mixed_wrapped(
+        draw, (100, problem_y), data["problem"],
+        problem_font, CHALK_PROBLEM, problem_max_w, problem_line_h,
+    )
+    sep_y = next_y + 20
     draw.line([(80, sep_y), (WIDTH - 80, sep_y)], fill=CHALK_TITLE, width=2)
 
-    # 解題步驟 (累積)
-    y = sep_y + 60
+    # ---- 解題步驟:先預算每一步的繪製高度,再決定顯示哪些 ----
     steps = data["steps"][:steps_to_show]
-    for i, step in enumerate(steps):
-        is_latest = (i == len(steps) - 1)
-        color = CHALK_HIGHLIGHT if is_latest else CHALK_WHITE
-        # 步驟編號
-        label = f"{i + 1}."
-        draw_text_mixed(draw, (100, y), label, step_font, color)
-        # 內容
-        draw_text_mixed(draw, (190, y), step["display"], step_font, color)
-        y += 130
+    step_max_w = WIDTH - 300
 
-    # 如果有附加圖片，顯示在右半邊
-    if "image" in data and data["image"]:
-        img_path = Path(data["image"])
+    step_heights: list[int] = []
+    for step in steps:
+        wrapped = wrap_text_for_font(step.get("display", ""), step_font, step_max_w)
+        h = max(1, len(wrapped)) * step_line_h + step_gap
+        step_heights.append(h)
+
+    # 滾動策略:固定優先塞入「最新」步驟,往前能塞多少塞多少,超過 STEP_Y_MAX 就丟掉
+    step_y_start = sep_y + 40
+    available = STEP_Y_MAX - step_y_start
+    visible_indices: list[int] = []
+    used = 0
+    for idx in range(len(steps) - 1, -1, -1):
+        h = step_heights[idx]
+        if used + h > available and visible_indices:
+            break
+        visible_indices.insert(0, idx)
+        used += h
+
+    # 實際畫可見步驟(編號仍用原始序號)
+    y = step_y_start
+    for idx in visible_indices:
+        step = steps[idx]
+        is_latest = (idx == len(steps) - 1)
+        color = CHALK_HIGHLIGHT if is_latest else CHALK_WHITE
+        draw_text_mixed(draw, (100, y), f"{idx + 1}.", step_font, color)
+        next_y = draw_text_mixed_wrapped(
+            draw, (190, y), step.get("display", ""),
+            step_font, color, step_max_w, step_line_h,
+        )
+        y = next_y + step_gap
+
+    # ---- 圖片:最新帶 image 的步驟優先,否則退回題目層級 image ----
+    img_to_show: str | None = None
+    for step in reversed(steps):
+        if step.get("image"):
+            img_to_show = step["image"]
+            break
+    if not img_to_show and data.get("image"):
+        img_to_show = data["image"]
+
+    if img_to_show:
+        img_path = Path(img_to_show)
         if img_path.exists():
             try:
-                # 載入圖片並縮放到適合大小
                 paste_img = Image.open(img_path)
-                paste_img.thumbnail((750, 600))  # 保持比例縮放
-                
-                # 放置位置：畫面右側，分隔線下方
+                # 高度上限也要避開字幕區
+                max_img_h = STEP_Y_MAX - (sep_y + 60)
+                paste_img.thumbnail((750, max(200, max_img_h)))
+
                 paste_x = WIDTH - paste_img.width - 100
                 paste_y = sep_y + 60
-                
-                # 畫一個白底的框框當作紙張，比較有融合感
+
                 pad = 10
                 draw.rectangle(
-                    [paste_x - pad, paste_y - pad, 
+                    [paste_x - pad, paste_y - pad,
                      paste_x + paste_img.width + pad, paste_y + paste_img.height + pad],
                     fill="white", outline=CHALK_WHITE, width=4
                 )
-                
-                # 確保圖片可被貼上 (處理 RGBA 等)
-                if paste_img.mode in ('RGBA', 'LA') or (paste_img.mode == 'P' and 'transparency' in paste_img.info):
-                    alpha = paste_img.convert('RGBA').split()[-1]
+
+                if paste_img.mode in ("RGBA", "LA") or (
+                    paste_img.mode == "P" and "transparency" in paste_img.info
+                ):
+                    alpha = paste_img.convert("RGBA").split()[-1]
                     img.paste(paste_img, (paste_x, paste_y), mask=alpha)
                 else:
                     img.paste(paste_img, (paste_x, paste_y))
@@ -299,8 +396,14 @@ def concat_clips(clip_paths: list[Path], out_path: Path):
 
 
 # ---------- 字幕 (SRT) ----------
+def _split_sentences(text: str) -> list[str]:
+    """按中英文句末標點 (。！？!?) 切句,保留標點於句尾"""
+    parts = re.split(r"(?<=[。！？!?])\s*", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
 def build_srt(data: dict, durations: list[float], out_path: Path):
-    """產生 SRT 字幕檔,每段對應一個步驟的 narration"""
+    """產生 SRT:每個步驟按 。！？ 拆成多個 cue,時長依字數比例分配"""
     def fmt(t: float) -> str:
         h = int(t // 3600)
         m = int((t % 3600) // 60)
@@ -308,16 +411,29 @@ def build_srt(data: dict, durations: list[float], out_path: Path):
         ms = int((t - int(t)) * 1000)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-    lines = []
+    lines: list[str] = []
+    cue_num = 1
     t = 0.0
-    for i, (step, dur) in enumerate(zip(data["steps"], durations)):
-        start = t
-        end = t + dur
-        lines.append(f"{i + 1}")
-        lines.append(f"{fmt(start)} --> {fmt(end)}")
-        lines.append(step["narration"])
-        lines.append("")
-        t = end + PAUSE_AFTER_EACH  # 下一段從停頓後開始
+    for step, dur in zip(data["steps"], durations):
+        sentences = _split_sentences(step.get("narration", ""))
+        if not sentences:
+            t += dur + PAUSE_AFTER_EACH
+            continue
+        total_chars = sum(len(s) for s in sentences) or 1
+        sub_start = t
+        for j, sent in enumerate(sentences):
+            # 最後一句用剩餘時間,避免浮點累積誤差
+            if j == len(sentences) - 1:
+                sub_end = t + dur
+            else:
+                sub_end = sub_start + dur * (len(sent) / total_chars)
+            lines.append(str(cue_num))
+            lines.append(f"{fmt(sub_start)} --> {fmt(sub_end)}")
+            lines.append(sent)
+            lines.append("")
+            cue_num += 1
+            sub_start = sub_end
+        t += dur + PAUSE_AFTER_EACH  # 下一步驟從停頓後開始
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
