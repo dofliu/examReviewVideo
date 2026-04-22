@@ -14,6 +14,7 @@ app.py — 考卷檢討影片系統 Web UI
 """
 import argparse
 import json
+import re
 import subprocess
 import threading
 import sys
@@ -24,11 +25,72 @@ from flask import Flask, request, jsonify, render_template_string, redirect, url
 
 app = Flask(__name__)
 
+BASE_DIR = Path(__file__).parent
+EXAMS_DIR = BASE_DIR / "exams"
+PDFS_DIR = BASE_DIR / "pdfs"
+SOLVE_SCRIPT = BASE_DIR / "solve.py"
+
 # 全域狀態 (啟動時設定)
-EXAM_PATH: Path = None
-VIDEO_DIR: Path = None
+EXAM_PATH: Path | None = None     # 目前編輯中的 exam.json;None 代表未選
+VIDEO_ROOT: Path | None = None    # 所有考卷影片的根目錄,例如 ./videos
 RENDER_LOCK = threading.Lock()
-RENDER_STATUS: dict = {}  # {pid: "idle" | "rendering" | "done" | "error"}
+RENDER_STATUS: dict = {}   # {pid: "idle" | "rendering" | "done" | "error"}
+SOLVE_STATUS: dict = {}    # {stem: {"state": "solving"|"done"|"error", "msg": str}}
+
+
+def current_exam_dir() -> Path:
+    """當前編輯考卷對應的子目錄,例如 ./videos/real_exam/"""
+    return VIDEO_ROOT / EXAM_PATH.stem
+
+
+# ------------------ 啟動時的 migration / 設定 ------------------
+# 把 repo root 散落的 exam JSONs 搬到 exams/ 集中管理。
+# 判準:JSON 有 problems 這個 key (list) → 當作 exam
+CONFIG_JSON_NAMES = {"tts_config.json", "pipeline_config.json", "pronunciation.json"}
+
+
+def _looks_like_exam_json(path: Path) -> bool:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return isinstance(data, dict) and isinstance(data.get("problems"), list)
+
+
+def migrate_root_exams() -> list[Path]:
+    """啟動時掃 repo root 的 *.json,把 exam 類型的搬進 exams/。回傳搬移後的新路徑"""
+    EXAMS_DIR.mkdir(exist_ok=True)
+    moved: list[Path] = []
+    for p in BASE_DIR.glob("*.json"):
+        if p.name in CONFIG_JSON_NAMES:
+            continue
+        if not _looks_like_exam_json(p):
+            continue
+        dst = EXAMS_DIR / p.name
+        if dst.exists():
+            # 同名已存在,避免覆蓋;加時間戳
+            dst = EXAMS_DIR / f"{p.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        p.rename(dst)
+        moved.append(dst)
+        print(f"[migrate] {p.name} -> {dst.relative_to(BASE_DIR)}")
+    return moved
+
+
+# ------------------ 檔名清理 ------------------
+# 允許中文、英數、底線、橫線、空白;禁止路徑字元跟 Windows 保留字
+_FNAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL", *[f"COM{i}" for i in range(1, 10)],
+                 *[f"LPT{i}" for i in range(1, 10)]}
+
+
+def sanitize_exam_name(name: str) -> str:
+    name = name.strip()
+    name = _FNAME_BAD.sub("", name)
+    name = re.sub(r"\.\.+", "", name)
+    name = name.strip(". ")   # 結尾點/空白在 Windows 會出事
+    if name.upper() in _WIN_RESERVED:
+        name = f"_{name}"
+    return name[:80]
 
 # ------------------ 聲音目錄 ------------------
 # 渲染時用哪支聲音 = tts_config.json 的 edge.voice。UI 改選項就更新 json。
@@ -78,7 +140,7 @@ def save_exam(data: dict):
 
 
 def problem_status(pid: str) -> dict:
-    mp4 = VIDEO_DIR / f"{pid}.mp4"
+    mp4 = current_exam_dir() / f"{pid}.mp4"
     render_state = RENDER_STATUS.get(pid, "idle")
     return {
         "rendered": mp4.exists(),
@@ -186,9 +248,13 @@ INDEX_HTML = BASE_CSS + """
       <h1>{{ data.exam_title }}</h1>
       <div class="muted" style="margin-top:4px">{{ data.problems|length }} 題 · {{ exam_path }}</div>
     </div>
-    <form method="POST" action="/render_all" style="margin:0">
-      <button class="btn btn-success">🎬 批次渲染全部</button>
-    </form>
+    <div style="display:flex;gap:8px">
+      <a href="/exams" class="btn btn-gray">📄 考卷列表</a>
+      <a href="/library" class="btn btn-gray">📚 Library</a>
+      <form method="POST" action="/render_all" style="margin:0">
+        <button class="btn btn-success">🎬 批次渲染全部</button>
+      </form>
+    </div>
   </div>
 """ + VOICE_PICKER_HTML + """
 
@@ -288,6 +354,8 @@ EDIT_HTML = BASE_CSS + """
 
 @app.route("/")
 def index():
+    if EXAM_PATH is None:
+        return redirect(url_for("exams_list"))
     data = load_exam()
     statuses = {p["id"]: problem_status(p["id"]) for p in data["problems"]}
     return render_template_string(
@@ -344,7 +412,7 @@ def render(pid):
             with RENDER_LOCK:  # 避免 pipeline.py 的 /home/claude/work 被多個任務搶用
                 subprocess.run(
                     [sys.executable, str(Path(__file__).parent / "batch.py"),
-                     str(EXAM_PATH), str(VIDEO_DIR), "--only", pid],
+                     str(EXAM_PATH), str(VIDEO_ROOT), "--only", pid],
                     check=True,
                 )
             RENDER_STATUS[pid] = "done"
@@ -367,7 +435,7 @@ def render_all():
             with RENDER_LOCK:
                 subprocess.run(
                     [sys.executable, str(Path(__file__).parent / "batch.py"),
-                     str(EXAM_PATH), str(VIDEO_DIR)],
+                     str(EXAM_PATH), str(VIDEO_ROOT)],
                     check=True,
                 )
             for p in data["problems"]:
@@ -383,7 +451,7 @@ def render_all():
 
 @app.route("/video/<pid>")
 def video(pid):
-    return send_from_directory(VIDEO_DIR, f"{pid}.mp4")
+    return send_from_directory(current_exam_dir(), f"{pid}.mp4")
 
 
 @app.route("/set_voice", methods=["POST"])
@@ -405,6 +473,331 @@ def voice_sample(voice_id):
     return send_from_directory(VOICE_SAMPLE_DIR, fname)
 
 
+# ------------------ Exams 管理 ------------------
+
+def _scan_exams() -> list[dict]:
+    """列出 exams/ 裡所有 exam JSON"""
+    EXAMS_DIR.mkdir(exist_ok=True)
+    items = []
+    for p in sorted(EXAMS_DIR.glob("*.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        title = data.get("exam_title") or p.stem
+        n_problems = len(data.get("problems", []))
+        exam_video_dir = VIDEO_ROOT / p.stem
+        n_videos = len(list(exam_video_dir.glob("*.mp4"))) if exam_video_dir.exists() else 0
+        items.append({
+            "stem": p.stem,
+            "title": title,
+            "problems": n_problems,
+            "videos": n_videos,
+            "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+            "is_current": EXAM_PATH is not None and p.resolve() == EXAM_PATH.resolve(),
+        })
+    return items
+
+
+EXAMS_HTML = BASE_CSS + """
+<div class="container-wide">
+  <div class="header-row">
+    <div>
+      <h1>📄 考卷列表</h1>
+      <div class="muted" style="margin-top:4px">{{ items|length }} 份 · 位置:{{ exams_dir }}</div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <a href="/library" class="btn btn-gray">📚 Library</a>
+      <a href="/upload" class="btn btn-success">⬆ 上傳新 PDF</a>
+    </div>
+  </div>
+
+  {% if not items %}
+  <div class="card"><span class="muted">還沒有考卷,按上方「上傳新 PDF」開始,或放一份 JSON 到 <code>exams/</code>。</span></div>
+  {% endif %}
+
+  {% for e in items %}
+  <div class="card" style="display:flex;align-items:center;justify-content:space-between">
+    <div style="flex:1;min-width:0">
+      <div class="problem-title">
+        <strong>{{ e.title }}</strong>
+        <span class="tiny">{{ e.stem }}.json · {{ e.problems }} 題 · {{ e.videos }} 支影片 · {{ e.mtime }}</span>
+        {% if e.is_current %}<span class="badge badge-done">編輯中</span>{% endif %}
+      </div>
+    </div>
+    <div class="actions">
+      {% if e.is_current %}
+        <a href="/" class="btn btn-primary">繼續編輯</a>
+      {% else %}
+        <a href="/switch/{{ e.stem }}" class="btn btn-primary">切換並編輯</a>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+"""
+
+
+UPLOAD_HTML = BASE_CSS + """
+<div class="container-wide">
+  <div class="header-row">
+    <div>
+      <a href="/exams" class="btn-link">← 回考卷列表</a>
+      <h1 style="margin-top:6px">⬆ 上傳考卷 PDF</h1>
+      <div class="muted" style="margin-top:4px">PDF 上傳後會丟給 Gemini Vision 解析,產出 exam.json</div>
+    </div>
+  </div>
+
+  {% if error %}
+  <div class="banner banner-warning">⚠ {{ error }}</div>
+  {% endif %}
+
+  <div class="card">
+    <form method="POST" action="/upload" enctype="multipart/form-data">
+      <div style="margin-bottom:14px">
+        <label class="muted" style="display:block;margin-bottom:4px">PDF 檔</label>
+        <input type="file" name="pdf" accept="application/pdf" required
+               style="padding:6px;border:1px solid #d3d1c7;border-radius:4px;width:100%">
+      </div>
+      <div style="margin-bottom:14px">
+        <label class="muted" style="display:block;margin-bottom:4px">考卷名稱 (存檔名,支援中文;空白=用 PDF 檔名)</label>
+        <input type="text" name="exam_name" maxlength="80" placeholder="例:114-02 靜力學期中"
+               style="padding:6px 8px;border:1px solid #d3d1c7;border-radius:4px;width:100%;font-family:inherit">
+      </div>
+      <div style="margin-bottom:14px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#555">
+          <input type="checkbox" name="mock" value="1">
+          Mock 模式 — 不呼叫 Gemini,只產範例 JSON(測試用,省 API 費用)
+        </label>
+      </div>
+      <button type="submit" class="btn btn-success">上傳並解析</button>
+    </form>
+  </div>
+
+  <div class="footer">
+    提示:正式解析約 30~60 秒(Gemini Vision 處理);Mock 模式幾秒就好。
+  </div>
+</div>
+"""
+
+
+SOLVE_PROGRESS_HTML = BASE_CSS + """
+<div class="container-wide">
+  <h1>🧠 Gemini 解析中…</h1>
+  <div class="card">
+    <div style="font-size:14px">考卷:<strong>{{ stem }}</strong></div>
+    <div id="state" class="muted" style="margin-top:6px">狀態:<span id="s">solving</span></div>
+    <div id="msg" class="tiny" style="margin-top:4px;color:#633806"></div>
+  </div>
+  <div class="muted" style="margin-top:8px">約 30~60 秒(Mock 模式快很多),完成會自動跳轉。</div>
+  <script>
+    const stem = {{ stem|tojson }};
+    async function poll() {
+      try {
+        const r = await fetch('/solve_status/' + encodeURIComponent(stem));
+        const j = await r.json();
+        document.getElementById('s').textContent = j.state;
+        if (j.msg) document.getElementById('msg').textContent = j.msg;
+        if (j.state === 'done') { window.location = '/switch/' + encodeURIComponent(stem); return; }
+        if (j.state === 'error') return;
+      } catch (e) {}
+      setTimeout(poll, 2000);
+    }
+    poll();
+  </script>
+</div>
+"""
+
+
+@app.route("/exams")
+def exams_list():
+    return render_template_string(
+        EXAMS_HTML, items=_scan_exams(), exams_dir=str(EXAMS_DIR)
+    )
+
+
+@app.route("/switch/<stem>")
+def switch_exam(stem):
+    global EXAM_PATH
+    target = EXAMS_DIR / f"{stem}.json"
+    if not target.exists():
+        abort(404)
+    EXAM_PATH = target.resolve()
+    current_exam_dir().mkdir(parents=True, exist_ok=True)
+    RENDER_STATUS.clear()
+    return redirect(url_for("index"))
+
+
+@app.route("/upload", methods=["GET", "POST"])
+def upload():
+    if request.method == "GET":
+        return render_template_string(UPLOAD_HTML, error=None)
+
+    # POST
+    f = request.files.get("pdf")
+    if not f or not f.filename:
+        return render_template_string(UPLOAD_HTML, error="沒有選到 PDF 檔")
+    if not f.filename.lower().endswith(".pdf"):
+        return render_template_string(UPLOAD_HTML, error="只接受 .pdf")
+
+    raw_name = (request.form.get("exam_name") or "").strip()
+    if not raw_name:
+        raw_name = Path(f.filename).stem
+    stem = sanitize_exam_name(raw_name)
+    if not stem:
+        return render_template_string(UPLOAD_HTML, error="考卷名稱清理後空白,改一個")
+
+    PDFS_DIR.mkdir(exist_ok=True)
+    EXAMS_DIR.mkdir(exist_ok=True)
+
+    pdf_path = PDFS_DIR / f"{stem}.pdf"
+    json_path = EXAMS_DIR / f"{stem}.json"
+    if json_path.exists():
+        return render_template_string(
+            UPLOAD_HTML,
+            error=f"'{stem}.json' 已存在,請改名或先從考卷列表刪掉舊的",
+        )
+
+    f.save(str(pdf_path))
+    use_mock = request.form.get("mock") == "1"
+    SOLVE_STATUS[stem] = {"state": "solving", "msg": "啟動 solve.py…"}
+
+    def worker():
+        cmd = [sys.executable, str(SOLVE_SCRIPT), str(pdf_path), str(json_path)]
+        if use_mock:
+            cmd.append("--mock")
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if r.returncode == 0 and json_path.exists():
+                SOLVE_STATUS[stem] = {"state": "done", "msg": "完成"}
+            else:
+                tail = (r.stderr or r.stdout or "")[-300:]
+                SOLVE_STATUS[stem] = {"state": "error", "msg": tail.strip() or "solve.py 失敗"}
+        except Exception as e:
+            SOLVE_STATUS[stem] = {"state": "error", "msg": str(e)}
+
+    threading.Thread(target=worker, daemon=True).start()
+    return render_template_string(SOLVE_PROGRESS_HTML, stem=stem)
+
+
+@app.route("/solve_status/<stem>")
+def solve_status(stem):
+    return jsonify(SOLVE_STATUS.get(stem, {"state": "unknown", "msg": ""}))
+
+
+# ------------------ Library (跨考卷影片瀏覽) ------------------
+
+def _scan_library() -> list[dict]:
+    """掃 VIDEO_ROOT 底下所有子資料夾,回傳每個考卷的影片清單"""
+    exams = []
+    if not VIDEO_ROOT.exists():
+        return exams
+    for sub in sorted(VIDEO_ROOT.iterdir()):
+        if not sub.is_dir():
+            continue
+        mp4s = sorted(sub.glob("*.mp4"))
+        if not mp4s:
+            continue
+        items = []
+        total = 0
+        for m in mp4s:
+            size = m.stat().st_size
+            total += size
+            items.append({
+                "name": m.name,
+                "stem": m.stem,
+                "size_mb": round(size / 1024 / 1024, 1),
+                "mtime": datetime.fromtimestamp(m.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "has_srt": (sub / f"{m.stem}.srt").exists(),
+            })
+        exams.append({
+            "exam_stem": sub.name,
+            "video_count": len(items),
+            "total_mb": round(total / 1024 / 1024, 1),
+            "is_current": EXAM_PATH is not None and sub.name == EXAM_PATH.stem,
+            "items": items,
+        })
+    return exams
+
+
+LIBRARY_HTML = BASE_CSS + """
+<div class="container-wide">
+  <div class="header-row">
+    <div>
+      <a href="/" class="btn-link">← 回考卷</a>
+      <h1 style="margin-top:6px">📚 影片 Library</h1>
+      <div class="muted" style="margin-top:4px">根目錄:{{ root }}</div>
+    </div>
+  </div>
+
+  {% if not exams %}
+  <div class="card"><span class="muted">還沒有任何已渲染的影片。先回去跑批次渲染。</span></div>
+  {% endif %}
+
+  {% for e in exams %}
+  <div class="card">
+    <div class="problem-title" style="margin-bottom:10px">
+      <strong>{{ e.exam_stem }}</strong>
+      <span class="tiny">{{ e.video_count }} 支 · {{ e.total_mb }} MB</span>
+      {% if e.is_current %}<span class="badge badge-done">目前編輯中</span>{% endif %}
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead>
+        <tr style="background:#f1efe8;text-align:left">
+          <th style="padding:6px 8px">檔名</th>
+          <th style="padding:6px 8px;width:90px">大小</th>
+          <th style="padding:6px 8px;width:140px">修改時間</th>
+          <th style="padding:6px 8px;width:60px">SRT</th>
+          <th style="padding:6px 8px;width:160px">動作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for it in e['items'] %}
+        <tr style="border-top:1px solid #eeece3">
+          <td class="mono" style="padding:6px 8px">{{ it.name }}</td>
+          <td style="padding:6px 8px">{{ it.size_mb }} MB</td>
+          <td style="padding:6px 8px">{{ it.mtime }}</td>
+          <td style="padding:6px 8px">{% if it.has_srt %}✓{% else %}—{% endif %}</td>
+          <td style="padding:6px 8px">
+            <a class="btn btn-gray" href="/library/file/{{ e.exam_stem }}/{{ it.name }}" target="_blank">▶ 觀看</a>
+            <a class="btn btn-link" href="/library/file/{{ e.exam_stem }}/{{ it.name }}" download>⬇</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
+
+  <div class="footer">
+    想編輯非「目前」考卷?重啟 Flask:<code>python app.py &lt;那份.json&gt;</code>
+  </div>
+</div>
+"""
+
+
+@app.route("/library")
+def library():
+    return render_template_string(
+        LIBRARY_HTML, exams=_scan_library(), root=str(VIDEO_ROOT)
+    )
+
+
+@app.route("/library/file/<exam_stem>/<filename>")
+def library_file(exam_stem, filename):
+    """供 library 頁面播放/下載影片跟字幕。嚴格檢查路徑避免目錄穿越"""
+    # 禁止 path traversal
+    if "/" in exam_stem or ".." in exam_stem or "/" in filename or ".." in filename:
+        abort(400)
+    folder = VIDEO_ROOT / exam_stem
+    if not folder.is_dir():
+        abort(404)
+    target = folder / filename
+    if not target.exists() or target.suffix.lower() not in {".mp4", ".srt"}:
+        abort(404)
+    return send_from_directory(folder, filename)
+
+
 @app.route("/api/status")
 def api_status():
     data = load_exam()
@@ -414,23 +807,38 @@ def api_status():
 # ------------------ Main ------------------
 
 def main():
-    global EXAM_PATH, VIDEO_DIR
+    global EXAM_PATH, VIDEO_ROOT
     ap = argparse.ArgumentParser()
-    ap.add_argument("exam_json", help="v1 exam.json 檔案路徑")
-    ap.add_argument("--video-dir", default="./videos", help="影片輸出資料夾")
+    ap.add_argument("exam_json", nargs="?", default=None,
+                    help="選填:指定啟動時預開的 exam.json;省略則停在考卷列表頁")
+    ap.add_argument("--video-dir", default="./videos",
+                    help="影片輸出根目錄 (實際輸出至 <video-dir>/<exam_stem>/)")
     ap.add_argument("--port", type=int, default=5000)
     args = ap.parse_args()
 
-    EXAM_PATH = Path(args.exam_json).resolve()
-    VIDEO_DIR = Path(args.video_dir).resolve()
-    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    VIDEO_ROOT = Path(args.video_dir).resolve()
+    VIDEO_ROOT.mkdir(parents=True, exist_ok=True)
+    EXAMS_DIR.mkdir(exist_ok=True)
+    PDFS_DIR.mkdir(exist_ok=True)
 
-    if not EXAM_PATH.exists():
-        import sys
-        sys.exit(f"❌ 找不到 {EXAM_PATH}")
+    moved = migrate_root_exams()
+    if moved:
+        print(f"📦 遷移 {len(moved)} 份 exam JSON 到 exams/")
 
-    print(f"📖 考卷: {EXAM_PATH}")
-    print(f"🎬 影片資料夾: {VIDEO_DIR}")
+    # 解析啟動參數;若給的路徑不存在,嘗試當成 exams/<stem>.json
+    if args.exam_json:
+        cand = Path(args.exam_json)
+        if not cand.exists():
+            cand = EXAMS_DIR / cand.name
+        if not cand.exists():
+            sys.exit(f"❌ 找不到 {args.exam_json}(也不在 exams/ 裡)")
+        EXAM_PATH = cand.resolve()
+        current_exam_dir().mkdir(parents=True, exist_ok=True)
+        print(f"📖 預開考卷: {EXAM_PATH}")
+    else:
+        print(f"📖 未指定考卷,將從考卷列表開始(/exams)")
+
+    print(f"🎬 影片根目錄: {VIDEO_ROOT}")
     print(f"🌐 Web UI: http://localhost:{args.port}")
     app.run(host="127.0.0.1", port=args.port, debug=False)
 

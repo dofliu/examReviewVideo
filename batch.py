@@ -36,12 +36,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("exam_json", help="v1 exam.json 路徑")
     ap.add_argument("output_dir", nargs="?", default="./videos",
-                    help="輸出目錄 (預設 ./videos)")
+                    help="輸出根目錄 (預設 ./videos),實際寫到 <output_dir>/<exam_stem>/")
     ap.add_argument("--only", nargs="+", help="只跑特定題目 id,例如 --only q1 q3")
     args = ap.parse_args()
 
     exam_path = Path(args.exam_json)
-    out_dir = Path(args.output_dir)
+    # 各考卷獨立 subfolder,避免多份 exam 都有 q1.mp4 會互相覆蓋
+    out_dir = Path(args.output_dir) / exam_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
 
     data = json.loads(exam_path.read_text(encoding="utf-8"))
