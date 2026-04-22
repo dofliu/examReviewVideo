@@ -8,3 +8,8 @@ pymupdf>=1.24
 fpdf2>=2.8
 Flask>=3.0
 reportlab>=4.0
+
+# 選用:本機聲音複製 backend(tts_config.json backend=f5 才需要)
+# 需 CUDA-enabled torch;RTX 4080 請先裝對應版 torch: https://pytorch.org/get-started/locally/
+# 然後:  pip install f5-tts
+# f5-tts

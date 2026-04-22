@@ -30,6 +30,44 @@ VIDEO_DIR: Path = None
 RENDER_LOCK = threading.Lock()
 RENDER_STATUS: dict = {}  # {pid: "idle" | "rendering" | "done" | "error"}
 
+# ------------------ 聲音目錄 ------------------
+# 渲染時用哪支聲音 = tts_config.json 的 edge.voice。UI 改選項就更新 json。
+TTS_CONFIG_PATH = Path(__file__).parent / "tts_config.json"
+VOICE_SAMPLE_DIR = Path(__file__).parent / "voices" / "samples"
+
+# (voice id, 顯示名稱, 試聽檔名)
+VOICES = [
+    ("zh-TW-HsiaoChenNeural", "小陳 (台女,新聞風)",   "voice_tw_hsiaochen_F.mp3"),
+    ("zh-TW-HsiaoYuNeural",   "小雨 (台女,較甜)",     "voice_tw_hsiaoyu_F.mp3"),
+    ("zh-CN-YunxiNeural",     "雲希 (陸男,年輕)",     "voice_cn_yunxi_M.mp3"),
+    ("zh-CN-YunyangNeural",   "雲揚 (陸男,主播穩)",   "voice_cn_yunyang_M.mp3"),
+    ("zh-CN-XiaoxiaoNeural",  "曉曉 (陸女,大陸通用)", "voice_cn_xiaoxiao_F.mp3"),
+]
+VOICE_IDS = {v[0] for v in VOICES}
+
+
+def read_current_voice() -> str:
+    if not TTS_CONFIG_PATH.exists():
+        return VOICES[0][0]
+    try:
+        cfg = json.loads(TTS_CONFIG_PATH.read_text(encoding="utf-8"))
+        return cfg.get("edge", {}).get("voice") or VOICES[0][0]
+    except Exception:
+        return VOICES[0][0]
+
+
+def write_current_voice(voice_id: str):
+    if voice_id not in VOICE_IDS:
+        return False
+    cfg = {}
+    if TTS_CONFIG_PATH.exists():
+        cfg = json.loads(TTS_CONFIG_PATH.read_text(encoding="utf-8"))
+    cfg.setdefault("edge", {})["voice"] = voice_id
+    TTS_CONFIG_PATH.write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return True
+
 
 def load_exam() -> dict:
     return json.loads(EXAM_PATH.read_text(encoding="utf-8"))
@@ -125,6 +163,22 @@ BASE_CSS = """
 </style>
 """
 
+VOICE_PICKER_HTML = """
+<div style="background:white;border:1px solid #e4e2dc;border-radius:8px;padding:10px 14px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
+  <span style="font-size:13px;color:#555">🗣 聲音</span>
+  <form method="POST" action="/set_voice" style="margin:0;flex:1;display:flex;align-items:center;gap:8px">
+    <select name="voice" onchange="this.form.submit()" style="padding:5px 8px;border:1px solid #d3d1c7;border-radius:4px;font-size:13px;font-family:inherit;min-width:240px">
+      {% for vid, label, _ in voices %}
+        <option value="{{ vid }}" {% if vid == current_voice %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <noscript><button type="submit" class="btn btn-gray" style="padding:4px 10px">套用</button></noscript>
+  </form>
+  <audio controls src="/voice_sample/{{ current_voice }}" style="height:32px"></audio>
+  <span class="tiny">試聽(下次渲染才生效)</span>
+</div>
+"""
+
 INDEX_HTML = BASE_CSS + """
 <div class="container">
   <div class="header-row">
@@ -136,6 +190,7 @@ INDEX_HTML = BASE_CSS + """
       <button class="btn btn-success">🎬 批次渲染全部</button>
     </form>
   </div>
+""" + VOICE_PICKER_HTML + """
 
   {% for p in data.problems %}
   {% set st = statuses[p.id] %}
@@ -181,6 +236,7 @@ EDIT_HTML = BASE_CSS + """
       <button form="editForm" type="submit" name="action" value="save_and_render" class="btn btn-success">🎬 儲存並渲染</button>
     </div>
   </div>
+""" + VOICE_PICKER_HTML + """
 
   {% if status.rendered %}
   <div class="banner banner-success">
@@ -235,7 +291,9 @@ def index():
     data = load_exam()
     statuses = {p["id"]: problem_status(p["id"]) for p in data["problems"]}
     return render_template_string(
-        INDEX_HTML, data=data, statuses=statuses, exam_path=str(EXAM_PATH)
+        INDEX_HTML,
+        data=data, statuses=statuses, exam_path=str(EXAM_PATH),
+        voices=VOICES, current_voice=read_current_voice(),
     )
 
 
@@ -246,7 +304,8 @@ def edit(pid):
     if not prob:
         abort(404)
     return render_template_string(
-        EDIT_HTML, prob=prob, status=problem_status(pid)
+        EDIT_HTML, prob=prob, status=problem_status(pid),
+        voices=VOICES, current_voice=read_current_voice(),
     )
 
 
@@ -325,6 +384,25 @@ def render_all():
 @app.route("/video/<pid>")
 def video(pid):
     return send_from_directory(VIDEO_DIR, f"{pid}.mp4")
+
+
+@app.route("/set_voice", methods=["POST"])
+def set_voice():
+    voice = request.form.get("voice", "")
+    write_current_voice(voice)
+    return redirect(request.referrer or url_for("index"))
+
+
+@app.route("/voice_sample/<voice_id>")
+def voice_sample(voice_id):
+    """試聽:回傳該 voice 的預先錄好樣本 mp3"""
+    entry = next((v for v in VOICES if v[0] == voice_id), None)
+    if not entry:
+        abort(404)
+    fname = entry[2]
+    if not (VOICE_SAMPLE_DIR / fname).exists():
+        abort(404)
+    return send_from_directory(VOICE_SAMPLE_DIR, fname)
 
 
 @app.route("/api/status")

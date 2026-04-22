@@ -1,0 +1,17 @@
+{
+  "_comment": "TTS 設定。backend = edge | f5。切 f5 要先 `pip install f5-tts`(會帶 CUDA torch)+ 準備 ./voices/teacher_ref.wav 跟對應逐字稿。F5 失敗會自動 fallback 到 edge。",
+  "backend": "edge",
+  "edge": {
+    "voice": "zh-CN-YunxiNeural",
+    "rate": "-5%"
+  },
+  "f5": {
+    "_comment": "ref_audio 建議 10~12 秒(F5 會自動截 12 秒上限);ref_text 必須是 ref_audio 的逐字稿。speed=1.0 原速,<1 變慢 >1 變快。lead_trim_sec 砍掉輸出前緣 F5 偶爾洩漏的 ref 片段。",
+    "ref_audio": "./voices/teacher_ref.wav",
+    "ref_text": "重複三次的因子，同學你要知道,三次方的意思大概有三個一模一樣的東西乘在一起對不對，點頭啊",
+    "model": "F5TTS_v1_Base",
+    "remove_silence": true,
+    "speed": 0.7,
+    "lead_trim_sec": 0.6
+  }
+}

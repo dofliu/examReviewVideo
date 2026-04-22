@@ -18,9 +18,10 @@ if sys.platform == "win32":
 
 from functools import lru_cache
 
-import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 from mutagen.mp3 import MP3
+
+from tts_backend import TTSBackend, load_tts_backend
 
 # ---------- 設定 ----------
 WIDTH, HEIGHT = 1920, 1080
@@ -34,13 +35,13 @@ BORDER_COLOR = (60, 90, 75)     # 黑板邊框
 FONT_PATH = os.environ.get("CLAUDE_FONT_PATH", "C:/Windows/Fonts/msjh.ttc")
 # 主字型缺字 (如 ≤、≥、∫、⊥) 時退回這支。seguisym 內建於 Windows,覆蓋大量數學/符號
 FALLBACK_FONT_PATH = os.environ.get("CLAUDE_FALLBACK_FONT_PATH", "C:/Windows/Fonts/seguisym.ttf")
-VOICE = "zh-TW-HsiaoChenNeural"
-RATE = "-5%"   # 講稍慢一點,老師口吻
 PAUSE_AFTER_EACH = 0.6  # 每步驟結束後停頓秒數
 
-WORK_DIR = Path(__file__).parent / "work"
-OUTPUT_DIR = Path(__file__).parent / "output"
-PRONUNCIATION_MAP_PATH = Path(__file__).parent / "pronunciation.json"
+BASE_DIR = Path(__file__).parent
+WORK_DIR = BASE_DIR / "work"
+OUTPUT_DIR = BASE_DIR / "output"
+PRONUNCIATION_MAP_PATH = BASE_DIR / "pronunciation.json"
+PIPELINE_CONFIG_PATH = BASE_DIR / "pipeline_config.json"
 
 
 # ---------- 發音前處理 ----------
@@ -60,9 +61,35 @@ def _load_pronunciation_map() -> list[tuple[str, str]]:
     return _PRONUNCIATION_MAP
 
 
+def _strip_outer_parens(s: str) -> str:
+    s = s.strip()
+    if s.startswith("(") and s.endswith(")"):
+        return s[1:-1]
+    return s
+
+
+def _rewrite_fractions(text: str) -> str:
+    """把「1/(s+3)」這類有括號的分式改成「s+3 分之 1」以便 TTS 唸對。
+    只處理至少一邊帶括號的情況,避免誤中 kg/m²、URL、日期等非數學用途。"""
+    # NUM / (DENOM) 形式
+    text = re.sub(
+        r"([\w\d]+|\([^()]+\))\s*/\s*\(([^()]+)\)",
+        lambda m: f"{m.group(2)} 分之 {_strip_outer_parens(m.group(1))}",
+        text,
+    )
+    # (NUM) / DENOM 形式(單邊括號,DENOM 不能再帶括號避免二次吃到)
+    text = re.sub(
+        r"\(([^()]+)\)\s*/\s*([A-Za-z_]\w*|\d+)",
+        lambda m: f"{m.group(2)} 分之 {m.group(1)}",
+        text,
+    )
+    return text
+
+
 def normalize_for_tts(text: str) -> str:
     """把數學/希臘符號替換成 TTS 拼音。替換時前後補 space 避免黏字,最後把多重空白壓成單一。
     SRT 字幕不走這層,仍保留原符號。"""
+    text = _rewrite_fractions(text)
     for src, dst in _load_pronunciation_map():
         text = text.replace(src, f" {dst} ")
     text = re.sub(r"\s+", " ", text).strip()
@@ -70,47 +97,24 @@ def normalize_for_tts(text: str) -> str:
 
 
 # ---------- TTS ----------
-TTS_ENGINE = None  # 第一次呼叫時決定 (edge 或 espeak)
+_TTS_BACKEND: TTSBackend | None = None
 
 
-async def _try_edge_tts(text: str, out_path: Path) -> bool:
-    try:
-        communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
-        await communicate.save(str(out_path))
-        return True
-    except Exception:
-        return False
-
-
-def _espeak_tts(text: str, out_path: Path):
-    """fallback: espeak-ng 離線中文 TTS (品質較機械化,僅用於沙箱 demo)"""
-    wav_path = out_path.with_suffix(".wav")
-    subprocess.run(
-        ["espeak-ng", "-v", "cmn", "-s", "140", "-p", "45",
-         text, "-w", str(wav_path)],
-        check=True, capture_output=True
-    )
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error",
-         "-i", str(wav_path), "-b:a", "128k", str(out_path)],
-        check=True
-    )
-    wav_path.unlink()
+def _get_tts_backend() -> TTSBackend:
+    """延遲載入 backend (讀 tts_config.json)"""
+    global _TTS_BACKEND
+    if _TTS_BACKEND is None:
+        _TTS_BACKEND = load_tts_backend()
+    return _TTS_BACKEND
 
 
 async def gen_tts(text: str, out_path: Path):
-    """優先用 edge-tts (自然中文),失敗則 fallback 到 espeak-ng"""
+    """透過設定檔選擇的 backend 合成語音;失敗會自動 fallback 到 edge"""
     text = normalize_for_tts(text)
-    global TTS_ENGINE
-    if TTS_ENGINE is None:
-        ok = await _try_edge_tts(text, out_path)
-        TTS_ENGINE = "edge" if ok else "espeak"
-        if ok:
-            return
-    if TTS_ENGINE == "edge":
-        await _try_edge_tts(text, out_path)
-    else:
-        _espeak_tts(text, out_path)
+    backend = _get_tts_backend()
+    ok = await backend.synthesize(text, out_path)
+    if not ok:
+        raise RuntimeError(f"TTS 全部 backend 都失敗: {text[:50]}")
 
 
 def mp3_duration(path: Path) -> float:
@@ -215,6 +219,59 @@ def draw_text_mixed_wrapped(
         draw_text_mixed(draw, (x, y), ln, main_font, fill)
         y += line_height
     return y
+
+
+# ---------- 視覺設定(pipeline_config.json)----------
+_PIPELINE_CONFIG: dict | None = None
+
+
+def _get_pipeline_config() -> dict:
+    global _PIPELINE_CONFIG
+    if _PIPELINE_CONFIG is None:
+        if PIPELINE_CONFIG_PATH.exists():
+            _PIPELINE_CONFIG = json.loads(PIPELINE_CONFIG_PATH.read_text(encoding="utf-8"))
+        else:
+            _PIPELINE_CONFIG = {}
+    return _PIPELINE_CONFIG
+
+
+def _overlay_teacher_photo(img: Image.Image):
+    """右下角貼老師照片(配 pipeline_config.json 的 teacher_photo 區塊)"""
+    cfg = _get_pipeline_config().get("teacher_photo", {}) or {}
+    if not cfg.get("enabled"):
+        return
+    path = Path(cfg.get("path", ""))
+    if not path.exists():
+        print(f"[warning] teacher_photo.path 不存在: {path}")
+        return
+    try:
+        size = int(cfg.get("size", 220))
+        margin = int(cfg.get("margin", 40))
+        shape = cfg.get("shape", "circle")
+        border_w = int(cfg.get("border_width", 3))
+
+        photo = Image.open(path).convert("RGBA").resize((size, size), Image.LANCZOS)
+
+        mask = Image.new("L", (size, size), 0)
+        md = ImageDraw.Draw(mask)
+        if shape == "circle":
+            md.ellipse([0, 0, size, size], fill=255)
+        else:
+            md.rectangle([0, 0, size, size], fill=255)
+
+        px = WIDTH - size - margin
+        py = HEIGHT - size - margin
+        img.paste(photo, (px, py), mask=mask)
+
+        if border_w > 0:
+            bd = ImageDraw.Draw(img)
+            box = [px - border_w, py - border_w, px + size + border_w, py + size + border_w]
+            if shape == "circle":
+                bd.ellipse(box, outline=CHALK_WHITE, width=border_w)
+            else:
+                bd.rectangle(box, outline=CHALK_WHITE, width=border_w)
+    except Exception as e:
+        print(f"[warning] 貼老師照片失敗: {e}")
 
 
 # ---------- 黑板渲染 ----------
@@ -350,6 +407,9 @@ def render_frame(
             except Exception as e:
                 print(f"[warning] 無法載入圖片 {img_path}: {e}")
 
+    # 右下角老師照片(若 pipeline_config.json 啟用)
+    _overlay_teacher_photo(img)
+
     img.save(out_path, "PNG")
 
 
@@ -450,7 +510,7 @@ async def main(json_path: str, out_name: str = "review"):
         ap = WORK_DIR / f"audio_{i:03d}.mp3"
         await gen_tts(step["narration"], ap)
         audio_files.append(ap)
-        print(f"   ✓ step {i+1}: {mp3_duration(ap):.2f}s  (engine={TTS_ENGINE})")
+        print(f"   ✓ step {i+1}: {mp3_duration(ap):.2f}s  (backend={_get_tts_backend().name})")
 
     print(f"[2/4] 渲染 {n} 幀黑板畫面...")
     frame_files = []

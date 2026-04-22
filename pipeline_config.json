@@ -1,0 +1,12 @@
+{
+  "_comment": "渲染相關設定。目前支援右下角老師頭像 overlay。之後有新的視覺選項都加這裡。",
+  "teacher_photo": {
+    "_comment": "enabled=true 表示不畫;改成 true 後,照 path 載入。shape=circle|rect,size 是正方形邊長(px),margin 是離畫面邊界的距離。",
+    "enabled": true,
+    "path": "./photos/teacher.png",
+    "size": 220,
+    "shape": "circle",
+    "margin": 40,
+    "border_width": 3
+  }
+}
