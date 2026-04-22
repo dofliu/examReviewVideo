@@ -2,3 +2,15 @@ videos
 videos_test
 output
 work
+
+# 個人化資源(聲音樣本例外,收在 voices/samples/)
+voices/*.wav
+voices/*.mp3
+photos/*.png
+photos/*.jpg
+photos/*.jpeg
+
+# Python / Claude 快取
+__pycache__/
+*.pyc
+.claude/
