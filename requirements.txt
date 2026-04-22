@@ -1,5 +1,6 @@
 edge-tts>=7.0
 Pillow>=10.0
+fonttools>=4.50
 mutagen>=1.47
 anthropic>=0.40
 pdfplumber>=0.11

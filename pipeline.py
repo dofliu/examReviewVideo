@@ -15,6 +15,8 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+from functools import lru_cache
+
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 from mutagen.mp3 import MP3
@@ -29,6 +31,8 @@ CHALK_PROBLEM = (255, 200, 140) # 粉筆橙 (題目)
 BORDER_COLOR = (60, 90, 75)     # 黑板邊框
 
 FONT_PATH = os.environ.get("CLAUDE_FONT_PATH", "C:/Windows/Fonts/msjh.ttc")
+# 主字型缺字 (如 ≤、≥、∫、⊥) 時退回這支。seguisym 內建於 Windows,覆蓋大量數學/符號
+FALLBACK_FONT_PATH = os.environ.get("CLAUDE_FALLBACK_FONT_PATH", "C:/Windows/Fonts/seguisym.ttf")
 VOICE = "zh-TW-HsiaoChenNeural"
 RATE = "-5%"   # 講稍慢一點,老師口吻
 PAUSE_AFTER_EACH = 0.6  # 每步驟結束後停頓秒數
@@ -110,6 +114,65 @@ def mp3_duration(path: Path) -> float:
     return MP3(str(path)).info.length
 
 
+# ---------- 字型 fallback ----------
+# 為什麼:msjh.ttc 缺 ≤、≥、∫、⊥… 等數學符號,直接畫會變 tofu (□)
+# 策略:載入主/副字型 cmap,逐字元決定用哪支字型,副字型同 size 快取
+
+
+@lru_cache(maxsize=None)
+def _font_codepoints(path: str) -> frozenset[int]:
+    """回傳字型支援的 Unicode codepoint 集合;ttc 取所有 subfont 聯集"""
+    try:
+        from fontTools.ttLib import TTCollection, TTFont
+    except ImportError:
+        return frozenset()
+    try:
+        if path.lower().endswith(".ttc"):
+            coll = TTCollection(path)
+            cps: set[int] = set()
+            for f in coll.fonts:
+                cps.update(f.getBestCmap().keys())
+            return frozenset(cps)
+        return frozenset(TTFont(path).getBestCmap().keys())
+    except Exception:
+        return frozenset()
+
+
+@lru_cache(maxsize=None)
+def _get_font(path: str, size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(path, size)
+
+
+def draw_text_mixed(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    main_font: ImageFont.FreeTypeFont,
+    fill,
+):
+    """主字型缺 glyph 的字元改用 fallback 字型畫,逐字元推進 x 座標"""
+    main_cps = _font_codepoints(FONT_PATH)
+    fb_cps = _font_codepoints(FALLBACK_FONT_PATH)
+    # cmap 讀不到 (fontTools 未裝或字型壞) → 退化成原本行為,全部用主字型
+    if not main_cps:
+        draw.text(xy, text, font=main_font, fill=fill)
+        return
+
+    x, y = xy
+    size = main_font.size
+    fb_font = _get_font(FALLBACK_FONT_PATH, size)
+    for ch in text:
+        cp = ord(ch)
+        if cp in main_cps:
+            font = main_font
+        elif fb_cps and cp in fb_cps:
+            font = fb_font
+        else:
+            font = main_font  # 兩邊都沒,畫成 tofu 也只能這樣
+        draw.text((x, y), ch, font=font, fill=fill)
+        x += int(font.getlength(ch))
+
+
 # ---------- 黑板渲染 ----------
 def draw_board_border(draw: ImageDraw.ImageDraw):
     """畫黑板木框"""
@@ -138,12 +201,12 @@ def render_frame(
     step_font = ImageFont.truetype(FONT_PATH, 68)
 
     # 左上角標題
-    draw.text((80, 60), data.get("title", ""), font=title_font, fill=CHALK_TITLE)
-    draw.text((80, 115), data.get("subtitle", ""), font=title_font, fill=CHALK_TITLE)
+    draw_text_mixed(draw, (80, 60), data.get("title", ""), title_font, CHALK_TITLE)
+    draw_text_mixed(draw, (80, 115), data.get("subtitle", ""), title_font, CHALK_TITLE)
 
     # 題目 (畫一條分隔線在下方)
     problem_y = 210
-    draw.text((100, problem_y), data["problem"], font=problem_font, fill=CHALK_PROBLEM)
+    draw_text_mixed(draw, (100, problem_y), data["problem"], problem_font, CHALK_PROBLEM)
     sep_y = problem_y + 100
     draw.line([(80, sep_y), (WIDTH - 80, sep_y)], fill=CHALK_TITLE, width=2)
 
@@ -155,9 +218,9 @@ def render_frame(
         color = CHALK_HIGHLIGHT if is_latest else CHALK_WHITE
         # 步驟編號
         label = f"{i + 1}."
-        draw.text((100, y), label, font=step_font, fill=color)
+        draw_text_mixed(draw, (100, y), label, step_font, color)
         # 內容
-        draw.text((190, y), step["display"], font=step_font, fill=color)
+        draw_text_mixed(draw, (190, y), step["display"], step_font, color)
         y += 130
 
     # 如果有附加圖片，顯示在右半邊
