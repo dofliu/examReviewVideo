@@ -35,6 +35,31 @@ PAUSE_AFTER_EACH = 0.6  # 每步驟結束後停頓秒數
 
 WORK_DIR = Path(__file__).parent / "work"
 OUTPUT_DIR = Path(__file__).parent / "output"
+PRONUNCIATION_MAP_PATH = Path(__file__).parent / "pronunciation.json"
+
+
+# ---------- 發音前處理 ----------
+_PRONUNCIATION_MAP: list[tuple[str, str]] | None = None
+
+
+def _load_pronunciation_map() -> list[tuple[str, str]]:
+    """載入 pronunciation.json 並依 key 長度由長到短排序 (longest-match)"""
+    global _PRONUNCIATION_MAP
+    if _PRONUNCIATION_MAP is None:
+        if PRONUNCIATION_MAP_PATH.exists():
+            raw = json.loads(PRONUNCIATION_MAP_PATH.read_text(encoding="utf-8"))
+            items = [(k, v) for k, v in raw.items() if not k.startswith("_")]
+            _PRONUNCIATION_MAP = sorted(items, key=lambda kv: -len(kv[0]))
+        else:
+            _PRONUNCIATION_MAP = []
+    return _PRONUNCIATION_MAP
+
+
+def normalize_for_tts(text: str) -> str:
+    """把數學/希臘符號替換成 TTS 念得出來的拼音,SRT 字幕不走這層,仍保留原符號"""
+    for src, dst in _load_pronunciation_map():
+        text = text.replace(src, dst)
+    return text
 
 
 # ---------- TTS ----------
@@ -68,6 +93,7 @@ def _espeak_tts(text: str, out_path: Path):
 
 async def gen_tts(text: str, out_path: Path):
     """優先用 edge-tts (自然中文),失敗則 fallback 到 espeak-ng"""
+    text = normalize_for_tts(text)
     global TTS_ENGINE
     if TTS_ENGINE is None:
         ok = await _try_edge_tts(text, out_path)
