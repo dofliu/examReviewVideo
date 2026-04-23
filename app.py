@@ -367,6 +367,7 @@ def index():
 
 @app.route("/edit/<pid>")
 def edit(pid):
+    if EXAM_PATH is None: return redirect(url_for("exams_list"))
     data = load_exam()
     prob = next((p for p in data["problems"] if p["id"] == pid), None)
     if not prob:
@@ -379,6 +380,7 @@ def edit(pid):
 
 @app.route("/save/<pid>", methods=["POST"])
 def save(pid):
+    if EXAM_PATH is None: return redirect(url_for("exams_list"))
     data = load_exam()
     prob = next((p for p in data["problems"] if p["id"] == pid), None)
     if not prob:
@@ -402,6 +404,7 @@ def save(pid):
 
 @app.route("/render/<pid>", methods=["POST", "GET"])
 def render(pid):
+    if EXAM_PATH is None: return redirect(url_for("exams_list"))
     if RENDER_STATUS.get(pid) == "rendering":
         return redirect(url_for("edit", pid=pid))
 
@@ -426,6 +429,7 @@ def render(pid):
 
 @app.route("/render_all", methods=["POST"])
 def render_all():
+    if EXAM_PATH is None: return redirect(url_for("exams_list"))
     data = load_exam()
     for p in data["problems"]:
         RENDER_STATUS[p["id"]] = "rendering"
@@ -800,6 +804,8 @@ def library_file(exam_stem, filename):
 
 @app.route("/api/status")
 def api_status():
+    if EXAM_PATH is None:
+        return jsonify({"error": "No exam selected"}), 400
     data = load_exam()
     return jsonify({p["id"]: problem_status(p["id"]) for p in data["problems"]})
 

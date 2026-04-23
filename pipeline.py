@@ -9,6 +9,9 @@ import os
 import re
 import subprocess
 import sys
+import wave
+import struct
+import math
 from pathlib import Path
 
 # Windows 終端 cp950 不支援 emoji，強制 UTF-8
@@ -86,10 +89,31 @@ def _rewrite_fractions(text: str) -> str:
     return text
 
 
+def _rewrite_alphanum(text: str) -> str:
+    """把 F1, F2, x1, y2 等字母加數字的組合轉換成中文唸法,避免 TTS 唸英文。"""
+    mapping = {
+        "0": "零", "1": "一", "2": "二", "3": "三", "4": "四",
+        "5": "五", "6": "六", "7": "七", "8": "八", "9": "九"
+    }
+
+    def repl(m):
+        letter = m.group(1)
+        num = m.group(2)
+        # 如果是像是 10, 15 這種多位數,暫不處理或逐字轉
+        # 這裡採取逐字轉, F12 -> F 一 二
+        num_cn = "".join(mapping.get(c, c) for c in num)
+        return f"{letter} {num_cn}"
+
+    # 尋找字母後連著數字的 pattern, 排除像是 100mm 這種單位
+    # 只針對 F, P, x, y, z, u, v, Q, T 等常見力學符號
+    return re.sub(r"([FPxyzuvQT])(\d+)", repl, text)
+
+
 def normalize_for_tts(text: str) -> str:
     """把數學/希臘符號替換成 TTS 拼音。替換時前後補 space 避免黏字,最後把多重空白壓成單一。
     SRT 字幕不走這層,仍保留原符號。"""
     text = _rewrite_fractions(text)
+    text = _rewrite_alphanum(text)
     for src, dst in _load_pronunciation_map():
         text = text.replace(src, f" {dst} ")
     text = re.sub(r"\s+", " ", text).strip()
@@ -235,8 +259,81 @@ def _get_pipeline_config() -> dict:
     return _PIPELINE_CONFIG
 
 
+def _prepare_dynamic_avatar(cfg: dict):
+    """將用戶提供的張/合嘴頭像加上圓角和邊框,存為 transparent PNG 供 FFmpeg overlay"""
+    if not cfg.get("enabled"): return
+    size = int(cfg.get("size", 220))
+    border_w = int(cfg.get("border_width", 3))
+    shape = cfg.get("shape", "circle")
+    
+    for key, out_name in [("path_closed", "avatar_closed.png"), ("path_open", "avatar_open.png")]:
+        in_path = Path(cfg.get(key, ""))
+        out_path = WORK_DIR / out_name
+        if not in_path.exists():
+            print(f"[warning] dynamic_avatar {key} 找不到: {in_path}")
+            continue
+            
+        try:
+            photo = Image.open(in_path).convert("RGBA").resize((size, size), Image.LANCZOS)
+            out = Image.new("RGBA", (size + border_w*2, size + border_w*2), (0,0,0,0))
+            
+            mask = Image.new("L", (size, size), 0)
+            md = ImageDraw.Draw(mask)
+            if shape == "circle":
+                md.ellipse([0, 0, size, size], fill=255)
+            else:
+                md.rectangle([0, 0, size, size], fill=255)
+                
+            out.paste(photo, (border_w, border_w), mask=mask)
+            
+            if border_w > 0:
+                bd = ImageDraw.Draw(out)
+                box = [border_w//2, border_w//2, size+border_w*1.5, size+border_w*1.5]
+                if shape == "circle":
+                    bd.ellipse(box, outline=CHALK_WHITE, width=border_w)
+                else:
+                    bd.rectangle(box, outline=CHALK_WHITE, width=border_w)
+            out.save(out_path, "PNG")
+        except Exception as e:
+            print(f"[warning] 處理 {key} 失敗: {e}")
+
+
+def _build_avatar_concat(audio_path: Path, out_txt: Path, duration: float, cfg: dict):
+    wav_path = out_txt.with_suffix(".wav")
+    # Convert MP3 to WAV (16kHz, mono) for fast RMS analysis
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(audio_path), "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav_path)], check=True)
+    
+    path_closed = (WORK_DIR / "avatar_closed.png").absolute().as_posix().replace('\\', '/')
+    path_open = (WORK_DIR / "avatar_open.png").absolute().as_posix().replace('\\', '/')
+    threshold = cfg.get("volume_threshold", 500)
+    
+    with wave.open(str(wav_path), 'rb') as w:
+        n_frames = w.getnframes()
+        data = w.readframes(n_frames)
+        
+    samples = struct.unpack(f"<{n_frames}h", data)
+    chunk_frames = 1600  # 10 fps (0.1s chunks)
+    
+    lines = []
+    for i in range(0, n_frames, chunk_frames):
+        chunk = samples[i:i+chunk_frames]
+        if not chunk: break
+        rms = math.sqrt(sum(s*s for s in chunk) / len(chunk))
+        is_open = rms > threshold
+        img = path_open if is_open else path_closed
+        lines.append(f"file '{img}'\nduration 0.1")
+        
+    lines.append(f"file '{path_closed}'\nduration {PAUSE_AFTER_EACH}")
+    lines.append(f"file '{path_closed}'")
+    out_txt.write_text("\n".join(lines), encoding="utf-8")
+    wav_path.unlink(missing_ok=True)
+
+
 def _overlay_teacher_photo(img: Image.Image):
     """右下角貼老師照片(配 pipeline_config.json 的 teacher_photo 區塊)"""
+    dyn_cfg = _get_pipeline_config().get("dynamic_avatar", {})
+    if dyn_cfg.get("enabled"): return # 如果開啟了動態頭像, 這裡就不繪製靜態圖
+
     cfg = _get_pipeline_config().get("teacher_photo", {}) or {}
     if not cfg.get("enabled"):
         return
@@ -369,14 +466,33 @@ def render_frame(
         )
         y = next_y + step_gap
 
-    # ---- 圖片:最新帶 image 的步驟優先,否則退回題目層級 image ----
+    # ---- 圖片:最新帶 image 或 diagram_svg 的步驟優先 ----
     img_to_show: str | None = None
+    svg_to_render: str | None = None
+    
     for step in reversed(steps):
+        if step.get("diagram_svg"):
+            svg_to_render = step["diagram_svg"]
+            break
         if step.get("image"):
             img_to_show = step["image"]
             break
-    if not img_to_show and data.get("image"):
+            
+    if not svg_to_render and not img_to_show and data.get("image"):
         img_to_show = data["image"]
+
+    # 優先處理 SVG
+    if svg_to_render:
+        try:
+            import cairosvg
+            svg_tmp = WORK_DIR / f"temp_diagram_{steps_to_show:03d}.png"
+            # 渲染 SVG 為透明 PNG, 放大 2 倍以確保清晰
+            cairosvg.svg2png(bytestring=svg_to_render.encode("utf-8"), write_to=str(svg_tmp), scale=2.0)
+            img_to_show = str(svg_tmp)
+        except ImportError:
+            print("[warning] 找不到 cairosvg,無法渲染 SVG 圖解。請執行 pip install cairosvg")
+        except Exception as e:
+            print(f"[warning] SVG 渲染失敗: {e}")
 
     if img_to_show:
         img_path = Path(img_to_show)
@@ -385,17 +501,20 @@ def render_frame(
                 paste_img = Image.open(img_path)
                 # 高度上限也要避開字幕區
                 max_img_h = STEP_Y_MAX - (sep_y + 60)
-                paste_img.thumbnail((750, max(200, max_img_h)))
+                # 圖解通常較寬, 給予較大寬度限制
+                paste_img.thumbnail((800, max(200, max_img_h)))
 
                 paste_x = WIDTH - paste_img.width - 100
                 paste_y = sep_y + 60
 
-                pad = 10
-                draw.rectangle(
-                    [paste_x - pad, paste_y - pad,
-                     paste_x + paste_img.width + pad, paste_y + paste_img.height + pad],
-                    fill="white", outline=CHALK_WHITE, width=4
-                )
+                # 只有一般圖片才加白框, SVG 繪製的圖解保持透明背景
+                if not svg_to_render:
+                    pad = 10
+                    draw.rectangle(
+                        [paste_x - pad, paste_y - pad,
+                         paste_x + paste_img.width + pad, paste_y + paste_img.height + pad],
+                        fill="white", outline=CHALK_WHITE, width=4
+                    )
 
                 if paste_img.mode in ("RGBA", "LA") or (
                     paste_img.mode == "P" and "transparency" in paste_img.info
@@ -416,19 +535,75 @@ def render_frame(
 # ---------- FFmpeg 合成 ----------
 def build_clip(frame_path: Path, audio_path: Path, duration: float, out_path: Path):
     """單一步驟 → 一段 mp4 clip (圖片 + 音檔,含結尾停頓)"""
-    # 在音檔後加 silence pad
+    cfg = _get_pipeline_config()
+    dyn_cfg = cfg.get("dynamic_avatar", {})
+    sfx_cfg = cfg.get("chalk_sfx", {})
+    
+    dyn_enabled = dyn_cfg.get("enabled", False)
+    if dyn_enabled and not ((WORK_DIR / "avatar_closed.png").exists() and (WORK_DIR / "avatar_open.png").exists()):
+        dyn_enabled = False
+
+    sfx_enabled = sfx_cfg.get("enabled", False)
+    sfx_path = Path(sfx_cfg.get("path", ""))
+    sfx_volume = sfx_cfg.get("volume", 0.15)
+
     total_duration = duration + PAUSE_AFTER_EACH
-    # 音訊處理鏈：resample 44.1kHz → 響度正規化 → 結尾靜音填充
-    af_chain = (
-        f"aresample=44100,"
-        f"loudnorm=I=-16:TP=-1.5:LRA=11,"
-        f"apad=pad_dur={PAUSE_AFTER_EACH}"
-    )
+    
+    # 基本音訊處理鏈 (語音)
+    af_narration = f"aresample=44100,loudnorm=I=-16:TP=-1.5:LRA=11"
+    
+    inputs = [
+        "-loop", "1", "-t", f"{total_duration:.3f}", "-i", str(frame_path),
+        "-i", str(audio_path)
+    ]
+    
+    next_in_idx = 2
+    sfx_in_idx = -1
+    avatar_in_idx = -1
+
+    if sfx_enabled and sfx_path.exists():
+        inputs += ["-stream_loop", "-1", "-i", str(sfx_path)]
+        sfx_in_idx = next_in_idx
+        next_in_idx += 1
+
+    if dyn_enabled:
+        avatar_txt = WORK_DIR / f"avatar_{audio_path.stem}.txt"
+        _build_avatar_concat(audio_path, avatar_txt, duration, dyn_cfg)
+        inputs += ["-f", "concat", "-safe", "0", "-i", str(avatar_txt)]
+        avatar_in_idx = next_in_idx
+        next_in_idx += 1
+
+    # Audio filtering
+    if sfx_in_idx != -1:
+        a_filter = (
+            f"[1:a]{af_narration}[voice];"
+            f"[{sfx_in_idx}:a]volume={sfx_volume},atrim=0:{total_duration:.3f}[bg];"
+            f"[voice][bg]amix=inputs=2:duration=first:dropout_transition=0.5,apad=pad_dur={PAUSE_AFTER_EACH}[out_a]"
+        )
+    else:
+        a_filter = f"[1:a]{af_narration},apad=pad_dur={PAUSE_AFTER_EACH}[out_a]"
+
+    # Video filtering
+    if dyn_enabled:
+        size = int(dyn_cfg.get("size", 220))
+        margin = int(dyn_cfg.get("margin", 40))
+        border_w = int(dyn_cfg.get("border_width", 3))
+        px = WIDTH - size - margin - border_w
+        py = HEIGHT - size - margin - border_w
+        # 將 avatar 蓋在黑板(0:v)上
+        v_filter = f"[{avatar_in_idx}:v]format=rgba[ava];[0:v][ava]overlay=x={px}:y={py}:eof_action=pass[out_v]"
+    else:
+        # 如果不需要 overlay
+        v_filter = f"[0:v]copy[out_v]"
+        # 原本不用 filter_complex 直接複製, 但為了統一邏輯這裡用 v_filter
+
+    filter_complex = f"{a_filter};{v_filter}"
+    
     cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-loop", "1", "-i", str(frame_path),
-        "-i", str(audio_path),
-        "-af", af_chain,
+        "ffmpeg", "-y", "-loglevel", "error"
+    ] + inputs + [
+        "-filter_complex", filter_complex,
+        "-map", "[out_v]", "-map", "[out_a]",
         "-c:v", "libx264", "-tune", "stillimage",
         "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
         "-pix_fmt", "yuv420p",
@@ -436,6 +611,7 @@ def build_clip(frame_path: Path, audio_path: Path, duration: float, out_path: Pa
         "-r", "30",
         str(out_path),
     ]
+    
     subprocess.run(cmd, check=True)
 
 
@@ -503,6 +679,9 @@ async def main(json_path: str, out_name: str = "review"):
     OUTPUT_DIR.mkdir(exist_ok=True)
     data = json.loads(Path(json_path).read_text(encoding="utf-8"))
     n = len(data["steps"])
+
+    # 準備動態頭像資源
+    _prepare_dynamic_avatar(_get_pipeline_config().get("dynamic_avatar", {}))
 
     print(f"[1/4] 生成 {n} 段旁白音檔...")
     audio_files = []

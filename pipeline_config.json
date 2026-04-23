@@ -2,11 +2,28 @@
   "_comment": "渲染相關設定。目前支援右下角老師頭像 overlay。之後有新的視覺選項都加這裡。",
   "teacher_photo": {
     "_comment": "enabled=true 表示不畫;改成 true 後,照 path 載入。shape=circle|rect,size 是正方形邊長(px),margin 是離畫面邊界的距離。",
-    "enabled": true,
+    "enabled": false,
     "path": "./photos/teacher.png",
     "size": 220,
     "shape": "circle",
     "margin": 40,
     "border_width": 3
+  },
+  "dynamic_avatar": {
+    "_comment": "enabled=true 啟用會動的老師頭像(根據語音音量替換閉嘴/張嘴圖), 將取代靜態的 teacher_photo。",
+    "enabled": true,
+    "path_closed": "./photos/teacher_closed.png",
+    "path_open": "./photos/teacher_open.png",
+    "size": 220,
+    "shape": "circle",
+    "margin": 40,
+    "border_width": 3,
+    "volume_threshold": 500
+  },
+  "chalk_sfx": {
+    "enabled": true,
+    "path": "./assets/sfx/chalk_write.mp3",
+    "volume": 0.15,
+    "loop_gap": 0.5
   }
 }
