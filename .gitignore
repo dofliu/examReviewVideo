@@ -11,7 +11,7 @@ photos/*.jpg
 photos/*.jpeg
 
 # 上傳的 PDF 可能含版權考題,不追蹤
-pdfs/*.pdf
+pdfs
 
 # Python / Claude 快取
 __pycache__/
