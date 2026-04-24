@@ -1,0 +1,18 @@
+  {% for e in items %}
+  <div class="card" style="display:flex;align-items:center;justify-content:space-between">
+    <div style="flex:1;min-width:0">
+      <div class="problem-title">
+        <strong>{{ e.title }}</strong>
+        <span class="tiny">{{ e.stem }}.json · {{ e.problems }} 題 · {{ e.videos }} 支影片 · {{ e.mtime }}</span>
+        {% if e.is_current %}<span class="badge badge-done">編輯中</span>{% endif %}
+      </div>
+    </div>
+    <div class="actions" style="display:flex;gap:8px;align-items:center">
+      <a href="/switch/{{ e.stem }}" class="btn btn-primary">進入編輯</a>
+      <form method="POST" action="/delete_exam_json/{{ e.stem }}" onsubmit="return confirm('確定要刪除此考卷 JSON 嗎？(注意：不會刪除影片資料夾)')">
+        <button type="submit" class="tiny-btn" style="color:#a52a2a;padding:6px 10px">🗑</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+</div>

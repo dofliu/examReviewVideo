@@ -19,13 +19,13 @@
   - 這份「真實錯誤清單」是後續優化依據
 
 ### Bug / 小修
-- [ ] **確認 CLI `python app.py <不存在的檔案>` 有友善錯誤**
+- [x] **確認 CLI `python app.py <不存在的檔案>` 有友善錯誤**
   - 目前 `argparse` + 手動 `sys.exit`,但剛做完 exam_json 改 optional,要確認 error path
-- [ ] **`/upload` 上傳超大 PDF(> 20 MB)會不會卡 Flask?**
-  - Flask 預設沒檔案大小限制,可能要加 `MAX_CONTENT_LENGTH`
+- [x] **`/upload` 上傳超大 PDF(> 20 MB)會不會卡 Flask?**
+  - Flask 預設沒檔案大小限制,加了 `MAX_CONTENT_LENGTH`
 
 ### 效率
-- [ ] **單步驟重生成按鈕**(ROADMAP v1.5)
+- [x] **單步驟重生成按鈕**(ROADMAP v1.5)
   - 影響最大的效率提升,列為下一個 milestone 首選
   - 需要:pipeline 支援只做 TTS + concat 某一個 clip,不要整題重跑
 
@@ -51,22 +51,22 @@
   - 候選未加但可能需要:`-` → `減`(注意 `-1` 是負一不是減一)、`×10⁶` 念法
 
 ### UI / UX
-- [ ] **Library 頁加刪除按鈕**
+- [x] **Library 頁加刪除按鈕**
   - 現在只能看、不能管理,刪舊影片要去檔案總管
   - 加個「🗑 刪除這份考卷的全部影片」,含確認對話框
-- [ ] **Exam 列表加刪除 / 重新命名**
-  - 同上,對 exam JSON 本身操作
+- [x] **Exam 列表加刪除**
+  - 對 exam JSON 本身操作 (重新命名暫緩, 刪除已實做)
 - [ ] **考卷列表上傳 PDF 後的預覽**
   - Gemini 解完直接進編輯頁有點突兀
   - 或許中間插一個「這是辨識結果,check 一下」的概覽頁?
 
 ### 渲染細節
 - [ ] **`display` 超長會 overflow?**
-  - 步驟文字現在有換行但字型大,2 行還 OK,3 行以上可能溢出
-  - 需要:動態縮字或警告
-- [ ] **Subtitle 段落底色**
+  - 步驟文字現在有換行但字型大, 2 行還 OK, 3 行以上可能溢出
+  - 需要: 動態縮字或警告
+- [x] **Subtitle 段落底色**
   - 目前底部留白給字幕但黑色背景沒對比
-  - 考慮 SRT 加 `{\an2}` tag 或播放器端處理
+  - 在 `render_frame` 加了半透明黑底條
 
 ---
 
@@ -100,7 +100,7 @@
 - **F5-TTS 幻覺**:ref 12 秒 cutoff + ref_text 對齊是主因,用 YouTube 抽音軌的 ref 品質不穩。v2 處理。
 - **Gemini 偶爾寫錯單位**:硬規則是人工 review,不是系統 bug。
 - **edge-tts 停用了 `zh-TW-YunJheNeural`**:台灣男聲目前無選項,只能用大陸男聲。沒辦法。
-- **Windows 終端 cp950 吃不下 emoji**:已用 `sys.stdout.reconfigure` 解決,但有新工具檔要記得加。
+- **Windows 終端 cp950 吃不下 emoji**: 已用 `sys.stdout.reconfigure` 解決。
 
 ---
 

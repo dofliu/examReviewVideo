@@ -2,7 +2,7 @@
   "_comment": "TTS 設定。backend = edge | f5。切 f5 要先 `pip install f5-tts`(會帶 CUDA torch)+ 準備 ./voices/teacher_ref.wav 跟對應逐字稿。F5 失敗會自動 fallback 到 edge。",
   "backend": "edge",
   "edge": {
-    "voice": "zh-TW-HsiaoChenNeural",
+    "voice": "zh-TW-HsiaoYuNeural",
     "rate": "-5%"
   },
   "f5": {

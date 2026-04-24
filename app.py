@@ -21,9 +21,15 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+# Windows 終端 cp950 不支援 emoji，強制 UTF-8
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, send_from_directory, abort
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024  # 32 MB
 
 BASE_DIR = Path(__file__).parent
 EXAMS_DIR = BASE_DIR / "exams"
@@ -187,7 +193,13 @@ BASE_CSS = """
   .btn-gray:hover { background: #444441; }
   .btn-link { background: transparent; color: #185fa5; padding: 4px 0; }
   .btn-link:hover { text-decoration: underline; }
+  .tiny-btn {
+    background: #f1efe8; border: 1px solid #d4d2cc; border-radius: 4px;
+    font-size: 11px; cursor: pointer; padding: 2px 4px; margin-top: 4px;
+  }
+  .tiny-btn:hover { background: #e4e2dc; border-color: #b5b3a9; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+
   .badge-done { background: #e1f5ee; color: #085041; }
   .badge-rendering { background: #faeeda; color: #633806; }
   .badge-draft { background: #f1efe8; color: #444441; }
@@ -331,7 +343,10 @@ EDIT_HTML = BASE_CSS + """
 
     {% for step in prob.steps %}
     <div class="step-row">
-      <div class="step-num">#{{ loop.index }}</div>
+      <div class="step-num">
+        #{{ loop.index }}
+        <button type="submit" name="action" value="render_from_{{ loop.index0 }}" class="tiny-btn" title="從此步驟開始重新渲染">🎬</button>
+      </div>
       <div class="step-col">
         <textarea name="display_{{ loop.index0 }}" rows="2" class="mono">{{ step.display }}</textarea>
       </div>
@@ -397,8 +412,15 @@ def save(pid):
     save_exam(data)
 
     # 根據按下的按鈕決定是否接著渲染
-    if request.form.get("action") == "save_and_render":
+    action = request.form.get("action")
+    if action == "save_and_render":
         return redirect(url_for("render", pid=pid))
+    elif action and action.startswith("render_from_"):
+        try:
+            step_idx = int(action.replace("render_from_", ""))
+            return redirect(url_for("render", pid=pid, step=step_idx))
+        except ValueError:
+            pass
     return redirect(url_for("edit", pid=pid))
 
 
@@ -408,16 +430,20 @@ def render(pid):
     if RENDER_STATUS.get(pid) == "rendering":
         return redirect(url_for("edit", pid=pid))
 
+    start_step = request.args.get("step")
     RENDER_STATUS[pid] = "rendering"
 
     def worker():
         try:
             with RENDER_LOCK:  # 避免 pipeline.py 的 /home/claude/work 被多個任務搶用
-                subprocess.run(
-                    [sys.executable, str(Path(__file__).parent / "batch.py"),
-                     str(EXAM_PATH), str(VIDEO_ROOT), "--only", pid],
-                    check=True,
-                )
+                cmd = [
+                    sys.executable, str(Path(__file__).parent / "batch.py"),
+                    str(EXAM_PATH), str(VIDEO_ROOT), "--only", pid
+                ]
+                if start_step is not None:
+                    cmd += ["--step", start_step]
+                
+                subprocess.run(cmd, check=True)
             RENDER_STATUS[pid] = "done"
         except Exception as e:
             print(f"[render {pid}] 失敗:{e}")
@@ -529,12 +555,11 @@ EXAMS_HTML = BASE_CSS + """
         {% if e.is_current %}<span class="badge badge-done">編輯中</span>{% endif %}
       </div>
     </div>
-    <div class="actions">
-      {% if e.is_current %}
-        <a href="/" class="btn btn-primary">繼續編輯</a>
-      {% else %}
-        <a href="/switch/{{ e.stem }}" class="btn btn-primary">切換並編輯</a>
-      {% endif %}
+    <div class="actions" style="display:flex;gap:8px;align-items:center">
+      <a href="/switch/{{ e.stem }}" class="btn btn-primary">進入編輯</a>
+      <form method="POST" action="/delete_exam_json/{{ e.stem }}" onsubmit="return confirm('確定要刪除此考卷 JSON 嗎？(注意：不會刪除影片資料夾)')">
+        <button type="submit" class="tiny-btn" style="color:#a52a2a;padding:6px 10px">🗑</button>
+      </form>
     </div>
   </div>
   {% endfor %}
@@ -632,6 +657,19 @@ def switch_exam(stem):
     return redirect(url_for("index"))
 
 
+@app.route("/delete_exam_json/<stem>", methods=["POST"])
+def delete_exam_json(stem):
+    global EXAM_PATH
+    if "/" in stem or ".." in stem:
+        abort(400)
+    target = EXAMS_DIR / f"{stem}.json"
+    if target.exists():
+        if EXAM_PATH and target.resolve() == EXAM_PATH.resolve():
+            EXAM_PATH = None
+        target.unlink()
+    return redirect(url_for("exams_list"))
+
+
 @app.route("/upload", methods=["GET", "POST"])
 def upload():
     if request.method == "GET":
@@ -671,7 +709,7 @@ def upload():
         if use_mock:
             cmd.append("--mock")
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=900)
             if r.returncode == 0 and json_path.exists():
                 SOLVE_STATUS[stem] = {"state": "done", "msg": "完成"}
             else:
@@ -740,10 +778,15 @@ LIBRARY_HTML = BASE_CSS + """
 
   {% for e in exams %}
   <div class="card">
-    <div class="problem-title" style="margin-bottom:10px">
-      <strong>{{ e.exam_stem }}</strong>
-      <span class="tiny">{{ e.video_count }} 支 · {{ e.total_mb }} MB</span>
-      {% if e.is_current %}<span class="badge badge-done">目前編輯中</span>{% endif %}
+    <div class="problem-title" style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center">
+      <div>
+        <strong>{{ e.exam_stem }}</strong>
+        <span class="tiny">{{ e.video_count }} 支 · {{ e.total_mb }} MB</span>
+        {% if e.is_current %}<span class="badge badge-done">目前編輯中</span>{% endif %}
+      </div>
+      <form method="POST" action="/library/delete_exam/{{ e.exam_stem }}" onsubmit="return confirm('確定要刪除「{{ e.exam_stem }}」資料夾下的所有影片嗎？')">
+        <button type="submit" class="tiny-btn" style="color:#a52a2a">🗑 刪除全部</button>
+      </form>
     </div>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead>
@@ -764,8 +807,12 @@ LIBRARY_HTML = BASE_CSS + """
           <td style="padding:6px 8px">{% if it.has_srt %}✓{% else %}—{% endif %}</td>
           <td style="padding:6px 8px">
             <a class="btn btn-gray" href="/library/file/{{ e.exam_stem }}/{{ it.name }}" target="_blank">▶ 觀看</a>
-            <a class="btn btn-link" href="/library/file/{{ e.exam_stem }}/{{ it.name }}" download>⬇</a>
+            <a class="btn btn-link" href="/library/file/{{ e.exam_stem }}/{{ it.name }}" download title="下載">⬇</a>
+            <form method="POST" action="/library/delete_file/{{ e.exam_stem }}/{{ it.name }}" style="display:inline" onsubmit="return confirm('刪除 {{ it.name }}?')">
+              <button type="submit" class="tiny-btn" style="color:#a52a2a;border:none;background:none;padding:0;margin:0;margin-left:8px" title="刪除">🗑</button>
+            </form>
           </td>
+
         </tr>
         {% endfor %}
       </tbody>
@@ -800,6 +847,32 @@ def library_file(exam_stem, filename):
     if not target.exists() or target.suffix.lower() not in {".mp4", ".srt"}:
         abort(404)
     return send_from_directory(folder, filename)
+
+
+@app.route("/library/delete_exam/<exam_stem>", methods=["POST"])
+def library_delete_exam(exam_stem):
+    if "/" in exam_stem or ".." in exam_stem:
+        abort(400)
+    folder = VIDEO_ROOT / exam_stem
+    if folder.is_dir():
+        import shutil
+        shutil.rmtree(folder)
+    return redirect(url_for("library"))
+
+
+@app.route("/library/delete_file/<exam_stem>/<filename>", methods=["POST"])
+def library_delete_file(exam_stem, filename):
+    if "/" in exam_stem or ".." in exam_stem or "/" in filename or ".." in filename:
+        abort(400)
+    folder = VIDEO_ROOT / exam_stem
+    target = folder / filename
+    if target.exists() and target.suffix.lower() == ".mp4":
+        target.unlink()
+        # 同時刪除配套的 srt
+        srt = target.with_suffix(".srt")
+        if srt.exists():
+            srt.unlink()
+    return redirect(url_for("library"))
 
 
 @app.route("/api/status")

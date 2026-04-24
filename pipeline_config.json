@@ -10,10 +10,15 @@
     "border_width": 3
   },
   "dynamic_avatar": {
-    "_comment": "enabled=true 啟用會動的老師頭像(根據語音音量替換閉嘴/張嘴圖), 將取代靜態的 teacher_photo。",
+    "_comment": "enabled=true 啟用會動的老師頭像(根據語音音量替換多種表情), 將取代靜態的 teacher_photo。",
     "enabled": true,
     "path_closed": "./photos/teacher_closed.png",
-    "path_open": "./photos/teacher_open.png",
+    "paths_talking": [
+      "./photos/teacher_small.png",
+      "./photos/teacher_open.png",
+      "./photos/teacher_oh.png",
+      "./photos/teacher_smile.png"
+    ],
     "size": 220,
     "shape": "circle",
     "margin": 40,

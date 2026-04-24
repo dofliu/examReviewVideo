@@ -38,6 +38,7 @@ def main():
     ap.add_argument("output_dir", nargs="?", default="./videos",
                     help="輸出根目錄 (預設 ./videos),實際寫到 <output_dir>/<exam_stem>/")
     ap.add_argument("--only", nargs="+", help="只跑特定題目 id,例如 --only q1 q3")
+    ap.add_argument("--step", type=int, help="從第幾個步驟(0-indexed)開始重新渲染(僅用於 --only 單題時)")
     args = ap.parse_args()
 
     exam_path = Path(args.exam_json)
@@ -68,10 +69,12 @@ def main():
         out_name = str(out_dir / pid)
         print(f"\n[{i+1}/{len(problems)}] 處理 {pid}: {prob['number']}")
         try:
-            subprocess.run(
-                [sys.executable, str(PIPELINE), str(v0_json_path.resolve()), pid],
-                check=True,
-            )
+            cmd = [sys.executable, str(PIPELINE), str(v0_json_path.resolve()), pid]
+            if args.step is not None and len(problems) == 1:
+                # pipeline.py 內部的 --step 是 1-indexed (第 1 步開始)
+                cmd += ["--step", str(args.step + 1)]
+
+            subprocess.run(cmd, check=True)
             # pipeline.py 輸出到 output/ 目錄，搬到 out_dir
             pipeline_out = Path(__file__).parent / "output"
             src_mp4 = pipeline_out / f"{pid}.mp4"
