@@ -402,12 +402,17 @@ def save(pid):
         abort(404)
     prob["problem"] = request.form["problem"].strip()
     n = int(request.form["step_count"])
+    existing_steps = prob.get("steps", [])
     new_steps = []
     for i in range(n):
         d = request.form.get(f"display_{i}", "").strip()
         nar = request.form.get(f"narration_{i}", "").strip()
         if d or nar:
-            new_steps.append({"display": d, "narration": nar})
+            # 保留原 step 的其他欄位 (如 diagram_svg, _section, image) 避免表單送出時洗掉
+            base = dict(existing_steps[i]) if i < len(existing_steps) and isinstance(existing_steps[i], dict) else {}
+            base["display"] = d
+            base["narration"] = nar
+            new_steps.append(base)
     prob["steps"] = new_steps
     save_exam(data)
 
